@@ -8,3 +8,6 @@ __pycache__/
 raw_data/
 app/data/images/
 temp_*
+
+chedmed_test_db_backup_29_7_2026.dump
+*.dump
