@@ -1,6 +1,10 @@
 import os
 import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+import hmac
+import hashlib
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, Header, status
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.models.schemas import (
     SearchRequest,
     PriceEstimateRequest,
@@ -22,6 +26,38 @@ from app.services.backup_sync_service import run_backup_sync
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 app = FastAPI(title="AI Search Service - Chedmed")
+
+# ---------------------------------------------------------
+# 1. Configuration CORS (Pour résoudre "Failed to fetch")
+# ---------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permet les requêtes depuis Swagger, Postman et tout frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------
+# Secret & Helper pour la signature Webhook
+# ---------------------------------------------------------
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "votre_secret_webhook_ici")
+
+def verify_webhook_signature(payload: bytes, signature: str) -> bool:
+    """
+    Vérifie la signature HMAC-SHA256 du webhook.
+    """
+    if not signature:
+        return False
+    
+    # Calcul de la signature attendue
+    expected_signature = hmac.new(
+        key=WEBHOOK_SECRET.encode("utf-8"),
+        msg=payload,
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(expected_signature, signature)
 
 
 def run_search_pipeline(text_for_understanding: str):
@@ -136,11 +172,31 @@ async def seller_suggest_description(
             os.remove(temp_path)
 
 
+# ---------------------------------------------------------
+# 2. Webhook avec vérification de la signature HMAC
+# ---------------------------------------------------------
 @app.post("/catalogue/webhook")
-def catalogue_webhook(event: WebhookEvent):
+async def catalogue_webhook(
+    request: Request,
+    event: WebhookEvent,
+    x_signature: str = Header(None, alias="X-Signature")
+):
     try:
+        # Récupération du corps brut de la requête pour valider la signature
+        raw_body = await request.body()
+
+        # Si un secret est configuré et qu'un header est attendu, on vérifie la signature
+        if WEBHOOK_SECRET and WEBHOOK_SECRET != "votre_secret_webhook_ici":
+            if not verify_webhook_signature(raw_body, x_signature):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Signature webhook invalide ou manquante."
+                )
+
         result = handle_webhook_event(event.eventId, event.eventType, event.productId)
         return {"acknowledged": True, **result}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Erreur traitement webhook: {str(e)}")
 
