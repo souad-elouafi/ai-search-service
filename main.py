@@ -1,6 +1,13 @@
 import os
 import shutil
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+import hmac
+import hashlib
+import json
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request, Header
+from starlette.concurrency import run_in_threadpool
+
 from app.models.schemas import (
     SearchRequest,
     PriceEstimateRequest,
@@ -17,11 +24,24 @@ from app.services.image_service import describe_image
 from app.services.price_service import estimate_price, check_price_alert
 from app.services.description_service import suggest_description
 from app.services.webhook_service import handle_webhook_event
-from app.config import CHEDMED_API_BASE_URL
+from app.config import (
+    AI_BUILD_LOCAL_INDEX_ON_STARTUP,
+    AI_WEBHOOK_SECRET,
+    CHEDMED_API_BASE_URL,
+)
 from app.services.backup_sync_service import run_backup_sync
 from app.services.scheduler import start_scheduler, stop_scheduler
 
 app = FastAPI(title="AI Search Service - Chedmed")
+
+WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS = 300
+
+
+def _parse_webhook_timestamp(value: str) -> datetime:
+    try:
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except ValueError:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def run_search_pipeline(text_for_understanding: str):
@@ -37,23 +57,37 @@ def search_text(request: SearchRequest):
         understood, results = run_search_pipeline(request.query)
         return {"understood_query": understood, "results": results}
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service IA temporairement indisponible: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service IA temporairement indisponible: {str(e)}",
+        )
 
 
 @app.post("/api/search/audio")
 async def search_audio(file: UploadFile = File(...)):
     temp_path = f"temp_{file.filename}"
+
     try:
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        transcriptions = transcribe_dual(temp_path)
-        understood = understand_audio_query(
+        transcriptions = await run_in_threadpool(transcribe_dual, temp_path)
+
+        understood = await run_in_threadpool(
+            understand_audio_query,
             transcriptions["whisper_text"],
             transcriptions["gemini_text"],
         )
-        query_embedding = generate_embedding(understood["search_text"])
-        results = search_similar(query_embedding, top_k=5)
+
+        query_embedding = await run_in_threadpool(
+            generate_embedding,
+            understood["search_text"]
+        )
+
+        results = search_similar(
+            query_embedding,
+            top_k=5
+        )
 
         return {
             "whisper_text": transcriptions["whisper_text"],
@@ -61,8 +95,13 @@ async def search_audio(file: UploadFile = File(...)):
             "understood_query": understood,
             "results": results,
         }
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service IA temporairement indisponible: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service IA temporairement indisponible: {str(e)}",
+        )
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -71,20 +110,27 @@ async def search_audio(file: UploadFile = File(...)):
 @app.post("/api/search/image")
 async def search_image(file: UploadFile = File(...)):
     temp_path = f"temp_{file.filename}"
+
     try:
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        description = describe_image(temp_path)
-        understood, results = run_search_pipeline(description)
+        description = await run_in_threadpool(describe_image, temp_path)
+
+        understood, results = await run_in_threadpool(run_search_pipeline, description)
 
         return {
             "image_description": description,
             "understood_query": understood,
             "results": results,
         }
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service IA temporairement indisponible: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service IA temporairement indisponible: {str(e)}",
+        )
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -93,19 +139,35 @@ async def search_image(file: UploadFile = File(...)):
 @app.post("/api/seller/estimate-price")
 def seller_estimate_price(request: PriceEstimateRequest):
     try:
-        result = estimate_price(request.description)
+        result = estimate_price(
+            request.description
+        )
+
         return result
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service IA temporairement indisponible: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service IA temporairement indisponible: {str(e)}",
+        )
 
 
 @app.post("/api/seller/check-price")
 def seller_check_price(request: PriceCheckRequest):
     try:
-        result = check_price_alert(request.description, request.category, request.seller_price)
+        result = check_price_alert(
+            request.description,
+            request.category,
+            request.seller_price,
+        )
+
         return result
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service IA temporairement indisponible: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service IA temporairement indisponible: {str(e)}",
+        )
 
 
 @app.post("/api/seller/suggest-description")
@@ -117,63 +179,177 @@ async def seller_suggest_description(
     image: UploadFile = File(None),
 ):
     temp_path = None
+
     try:
-        keywords_list = [k.strip() for k in keywords.split(",") if k.strip()]
+        keywords_list = [
+            k.strip()
+            for k in keywords.split(",")
+            if k.strip()
+        ]
 
         if image is not None:
             temp_path = f"temp_{image.filename}"
-            with open(temp_path, "wb") as buffer:
-                shutil.copyfileobj(image.file, buffer)
 
-        descriptions = suggest_description(
-            product_name, category, keywords_list, language, temp_path
+            with open(temp_path, "wb") as buffer:
+                shutil.copyfileobj(
+                    image.file,
+                    buffer
+                )
+
+        descriptions = await run_in_threadpool(
+            suggest_description,
+            product_name,
+            category,
+            keywords_list,
+            language,
+            temp_path,
         )
+
         return descriptions
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service IA temporairement indisponible: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service IA temporairement indisponible: {str(e)}",
+        )
+
     finally:
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
 
 
+# ==========================================================
+# WEBHOOK SÉCURISÉ AVEC HMAC-SHA256
+# ==========================================================
+
 @app.post("/catalogue/webhook")
-def catalogue_webhook(event: WebhookEvent):
+async def catalogue_webhook(
+    request: Request,
+    event_id: str | None = Header(default=None, alias="X-ChedMed-Event-Id"),
+    timestamp: str | None = Header(default=None, alias="X-ChedMed-Timestamp"),
+    signature: str | None = Header(default=None, alias="X-ChedMed-Signature"),
+):
+
+    # Vérifier que le secret est configuré
+    if not AI_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="AI_WEBHOOK_SECRET non configuré",
+        )
+
+    # Vérifier que Chedmed a envoyé une signature
+    if not event_id or not timestamp or not signature:
+        raise HTTPException(
+            status_code=401,
+            detail="En-tetes webhook manquants",
+        )
+
     try:
-        result = handle_webhook_event(event.eventId, event.eventType, event.productId)
-        return {"acknowledged": True, **result}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Erreur traitement webhook: {str(e)}")
+        signed_at = _parse_webhook_timestamp(timestamp)
+    except (ValueError, OverflowError):
+        raise HTTPException(status_code=401, detail="Timestamp webhook invalide")
+    if abs((datetime.now(timezone.utc) - signed_at).total_seconds()) > WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS:
+        raise HTTPException(status_code=401, detail="Timestamp webhook expire")
+
+    # Récupérer le body exact envoyé par Chedmed
+    raw_body = await request.body()
+
+    # Recalculer la signature avec notre secret partagé
+    expected_signature = hmac.new(
+        AI_WEBHOOK_SECRET.encode("utf-8"),
+        timestamp.encode("utf-8") + b"." + raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    # Comparer la signature reçue avec celle calculée
+    if not hmac.compare_digest(
+        expected_signature,
+        signature,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Signature webhook invalide",
+        )
+
+    # La signature est valide : traiter le JSON
+    try:
+        payload = json.loads(raw_body)
+
+        event = WebhookEvent(**payload)
+        if event.eventId != event_id:
+            raise HTTPException(status_code=400, detail="Event ID incoherent")
+
+        result = await run_in_threadpool(
+            handle_webhook_event,
+            event_id,
+            event.eventType,
+            event.productId,
+        )
+
+        return {
+            "acknowledged": True,
+            **result,
+        }
+
+    except HTTPException:
+        raise
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=400,
+            detail="Payload webhook invalide",
+        )
 
 
 @app.post("/admin/sync-catalogue")
 def admin_sync_catalogue():
     try:
         if not CHEDMED_API_BASE_URL:
-            raise HTTPException(status_code=400, detail="CHEDMED_API_BASE_URL non configure dans .env")
+            raise HTTPException(
+                status_code=400,
+                detail="CHEDMED_API_BASE_URL non configure dans .env",
+            )
+
         result = faiss_service.sync_from_chedmed_api()
+
         return result
+
     except HTTPException:
         raise
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Erreur synchronisation: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Erreur synchronisation: {str(e)}",
+        )
 
 
 @app.post("/admin/backup-sync")
 def admin_backup_sync():
     try:
         if not CHEDMED_API_BASE_URL:
-            raise HTTPException(status_code=400, detail="CHEDMED_API_BASE_URL non configure dans .env")
+            raise HTTPException(
+                status_code=400,
+                detail="CHEDMED_API_BASE_URL non configure dans .env",
+            )
+
         result = run_backup_sync()
+
         return result
+
     except HTTPException:
         raise
+
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Erreur synchronisation de secours: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Erreur synchronisation de secours: {str(e)}",
+        )
 
 
 @app.on_event("startup")
 def startup_event():
-    build_index()
+    if AI_BUILD_LOCAL_INDEX_ON_STARTUP:
+        build_index()
     start_scheduler()
 
 

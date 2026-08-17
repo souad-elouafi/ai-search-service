@@ -1,6 +1,10 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from app.services.backup_sync_service import run_backup_sync
-from app.config import CHEDMED_API_BASE_URL
+from app.config import (
+    BACKUP_SYNC_INTERVAL_MINUTES,
+    CHEDMED_API_BASE_URL,
+    ENABLE_BACKUP_SCHEDULER,
+)
 
 scheduler = BackgroundScheduler()
 
@@ -18,11 +22,28 @@ def _safe_backup_sync():
 
 
 def start_scheduler():
-    """Demarre la tache periodique (toutes les 15 minutes)."""
-    scheduler.add_job(_safe_backup_sync, "interval", minutes=15, id="backup_sync_job")
+    """Start one in-process job when explicitly enabled for this process."""
+    if not ENABLE_BACKUP_SCHEDULER:
+        return False
+    if scheduler.running:
+        return False
+    scheduler.add_job(
+        _safe_backup_sync,
+        "interval",
+        minutes=BACKUP_SYNC_INTERVAL_MINUTES,
+        id="backup_sync_job",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
-    print("Scheduler demarre : synchronisation de secours toutes les 15 minutes.")
+    print(
+        "Scheduler demarre : synchronisation de secours toutes les "
+        f"{BACKUP_SYNC_INTERVAL_MINUTES} minutes."
+    )
+    return True
 
 
 def stop_scheduler():
-    scheduler.shutdown(wait=False) 
+    if scheduler.running:
+        scheduler.shutdown(wait=False)

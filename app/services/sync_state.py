@@ -5,15 +5,15 @@ from datetime import datetime, timezone
 STATE_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "sync_state.json")
 
 
-def get_last_sync_time() -> str:
+def get_last_sync_time() -> str | None:
     """Retourne le timestamp ISO de la derniere synchronisation reussie.
-    Si aucune synchro n'a jamais eu lieu, retourne une date tres ancienne."""
+    Si aucune synchro n'a jamais eu lieu, retourne None."""
     if not os.path.exists(STATE_FILE):
-        return "2000-01-01T00:00:00Z"
+        return None
 
     with open(STATE_FILE, "r", encoding="utf-8") as f:
         state = json.load(f)
-    return state.get("last_sync_time", "2000-01-01T00:00:00Z")
+    return state.get("last_sync_time")
 
 
 def set_last_sync_time(timestamp_iso: str = None):
