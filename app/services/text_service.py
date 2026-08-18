@@ -5,7 +5,8 @@ from app.prompts.text_search_prompt import TEXT_SEARCH_SYSTEM_PROMPT
 
 client = Groq(api_key=GROQ_API_KEY)
 
-MODEL_NAME = "llama-3.3-70b-versatile"
+from app.config import GROQ_MODEL_NAME
+MODEL_NAME = GROQ_MODEL_NAME
 
 AUDIO_UNDERSTAND_PROMPT = """Tu es un assistant qui comprend des requetes de recherche produit
 pour une marketplace marocaine (vetements, chaussures, sacs, accessoires).

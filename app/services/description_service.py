@@ -2,6 +2,7 @@ from groq import Groq
 from google import genai
 from app.config import GROQ_API_KEY, GEMINI_API_KEY
 from PIL import Image
+from app.config import GROQ_MODEL_NAME
 
 client = Groq(api_key=GROQ_API_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -83,7 +84,7 @@ Analyse visuelle de la photo : {image_text}
 Redige la description."""
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        MODEL_NAME = GROQ_MODEL_NAME,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},

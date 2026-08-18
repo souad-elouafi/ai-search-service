@@ -11,3 +11,7 @@ temp_*
 
 chedmed_test_db_backup_29_7_2026.dump
 *.dump
+
+test_data.sql
+
+test_data.sql
