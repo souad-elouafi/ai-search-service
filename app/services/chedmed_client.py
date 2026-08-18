@@ -33,3 +33,23 @@ def get_product_by_id(product_id: str):
     cursor.close()
     conn.close()
     return product
+
+def fetch_products_updated_after(since_timestamp=None):
+    """Récupère les produits mis à jour après une date/timestamp donnée."""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    if since_timestamp:
+        cursor.execute("SELECT * FROM products WHERE updated_at > %s;", (since_timestamp,))
+    else:
+        cursor.execute("SELECT * FROM products;")
+        
+    products = cursor.fetchall()
+    
+    cursor.close()
+    conn.close()
+    return products
+
+# Alias de compatibilité pour les autres services (webhook, faiss, backup_sync)
+fetch_product = get_product_by_id
+fetch_all_products = get_all_products
